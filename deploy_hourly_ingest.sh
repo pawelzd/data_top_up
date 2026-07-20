@@ -21,7 +21,7 @@ gcloud run jobs deploy "$JOB" \
   --project "$PROJECT" --region "$REGION" \
   --image "$IMAGE" --service-account "$RUNTIME_SA" \
   --max-retries 1 --task-timeout 1800 \
-  --set-env-vars "BIGQUERY_TABLE=${PROJECT}.core.token_ohlcv,BIGQUERY_LOCATION=europe-central2,HOURS_BACK=3,RATE_LIMIT_RPM=100" \
+  --set-env-vars "BIGQUERY_TABLE=${PROJECT}.core.token_ohlcv,BIGQUERY_LOCATION=europe-central2,HOURS_BACK=3,RATE_LIMIT_RPM=800" \
   --set-secrets "BIRDEYE_API_KEY=birdeye-api-key:latest"
 
 # Hourly trigger at :02 — Cloud Scheduler -> Cloud Run Jobs API (jobs.run).

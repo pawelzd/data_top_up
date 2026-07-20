@@ -13,7 +13,7 @@ REGION="${REGION:-europe-central2}"
 REPO="${REPO:-rl}"                                    # Artifact Registry repo
 JOB="${JOB:-birdeye-candidate-pull}"
 IMAGE="${IMAGE:-${REGION}-docker.pkg.dev/${PROJECT}/${REPO}/${JOB}:latest}"
-RUNTIME_SA="${RUNTIME_SA:-rl-ingest@${PROJECT}.iam.gserviceaccount.com}"
+RUNTIME_SA="${RUNTIME_SA:-rl-prod@${PROJECT}.iam.gserviceaccount.com}"
 
 # Candidate screen (deliberately loose — the membership rule tightens downstream).
 MAX_TOKENS="${MAX_TOKENS:-500}"

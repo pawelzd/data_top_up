@@ -1,0 +1,10 @@
+# Parameterized Cloud Build config — builds any of this repo's Dockerfiles in the
+# cloud (no local Docker needed) and pushes to Artifact Registry.
+#   gcloud builds submit --config cloudbuild.yaml \
+#     --substitutions=_DOCKERFILE=Dockerfile.hourly_ingest,_IMAGE=<image> .
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args: ["build", "-f", "${_DOCKERFILE}", "-t", "${_IMAGE}", "."]
+images: ["${_IMAGE}"]
+options:
+  logging: CLOUD_LOGGING_ONLY

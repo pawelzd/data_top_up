@@ -13,9 +13,9 @@ IMAGE="${IMAGE:-${REGION}-docker.pkg.dev/${PROJECT}/${REPO}/${JOB}:latest}"
 RUNTIME_SA="${RUNTIME_SA:-rl-ingest@${PROJECT}.iam.gserviceaccount.com}"
 SCHEDULER_SA="${SCHEDULER_SA:-rl-scheduler@${PROJECT}.iam.gserviceaccount.com}"
 
-echo "[deploy] building $IMAGE"
-docker build -f Dockerfile.hourly_ingest -t "$IMAGE" .
-docker push "$IMAGE"
+echo "[deploy] building $IMAGE (Cloud Build — no local Docker)"
+gcloud builds submit --project "$PROJECT" --config cloudbuild.yaml \
+  --substitutions="_DOCKERFILE=Dockerfile.hourly_ingest,_IMAGE=${IMAGE}" .
 
 gcloud run jobs deploy "$JOB" \
   --project "$PROJECT" --region "$REGION" \

@@ -21,9 +21,9 @@ MIN_LIQUIDITY_USD="${MIN_LIQUIDITY_USD:-50000}"
 SORT_BY="${SORT_BY:-volume_24h_usd}"
 BACKFILL_NEW_TOKENS="${BACKFILL_NEW_TOKENS:-true}"
 
-echo "[deploy] building $IMAGE"
-docker build -f Dockerfile.candidate_pull -t "$IMAGE" .
-docker push "$IMAGE"
+echo "[deploy] building $IMAGE (Cloud Build — no local Docker)"
+gcloud builds submit --project "$PROJECT" --config cloudbuild.yaml \
+  --substitutions="_DOCKERFILE=Dockerfile.candidate_pull,_IMAGE=${IMAGE}" .
 
 gcloud run jobs deploy "$JOB" \
   --project "$PROJECT" --region "$REGION" \

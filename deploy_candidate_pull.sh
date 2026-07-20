@@ -9,7 +9,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 PROJECT="${PROJECT:-crypto-trading-474111}"
-REGION="${REGION:-us-central1}"
+REGION="${REGION:-europe-central2}"
 REPO="${REPO:-rl}"                                    # Artifact Registry repo
 JOB="${JOB:-birdeye-candidate-pull}"
 IMAGE="${IMAGE:-${REGION}-docker.pkg.dev/${PROJECT}/${REPO}/${JOB}:latest}"

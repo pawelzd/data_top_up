@@ -1,0 +1,11 @@
+# Keep the candidate-pull image lean and free of local data/keys.
+.git/
+.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+# Local token lists / gap CSVs / scratch — never bake into the image.
+topup.json
+tokens.json
+*.csv
+run.ps1

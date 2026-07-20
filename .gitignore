@@ -4,3 +4,7 @@ venv/
 .venv/
 *.env
 .env.*
+# Local scratch / data inputs — not code (topup.json is a token-address list).
+topup.json
+tokens.json
+*.csv

@@ -1,0 +1,25 @@
+# birdeye-candidate-pull — weekly universe discovery fetcher (Cloud Run Job).
+#
+# Runs candidate_pull.py to completion: Token List V3 discovery → append to
+# raw.raw_birdeye_market_data → best-effort OHLCV backfill of new tokens (reuses
+# backfill_birdeye_ohlcv.py). Auth to BigQuery is ADC (the runtime SA); the
+# Birdeye key comes from Secret Manager at deploy time (never baked in).
+#
+# Build from the data_top_up repo root:
+#   docker build -f Dockerfile.candidate_pull -t <IMAGE> .
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
+
+# candidate_pull subprocesses backfill_birdeye_ohlcv.py for new-token OHLCV.
+COPY candidate_pull.py backfill_birdeye_ohlcv.py /app/
+
+ENTRYPOINT ["python", "/app/candidate_pull.py"]

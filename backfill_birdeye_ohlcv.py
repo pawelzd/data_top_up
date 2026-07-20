@@ -140,6 +140,16 @@ def parse_args() -> argparse.Namespace:
         help="Rows per BigQuery append job.",
     )
     parser.add_argument(
+        "--flush-row-threshold",
+        type=int,
+        default=25000,
+        help=(
+            "Buffer rows until this many are pending before writing to "
+            "BigQuery. Keeps large runs under the per-table update quota. "
+            "Use 1 to write after every token. Default: 25000."
+        ),
+    )
+    parser.add_argument(
         "--rate-limit-rpm",
         type=float,
         default=60.0,
@@ -1133,15 +1143,16 @@ def main() -> int:
                     f"{token_new_rows} new rows"
                 )
                 total_new_rows += token_new_rows
-                total_inserted_rows += flush_pending_rows(
-                    client,
-                    args.table,
-                    pending_rows,
-                    args.insert_batch_size,
-                    args.bigquery_location,
-                    args.dry_run,
-                    f"after token {index}/{len(token_addresses)}",
-                )
+                if len(pending_rows) >= args.flush_row_threshold:
+                    total_inserted_rows += flush_pending_rows(
+                        client,
+                        args.table,
+                        pending_rows,
+                        args.insert_batch_size,
+                        args.bigquery_location,
+                        args.dry_run,
+                        f"after token {index}/{len(token_addresses)}",
+                    )
     except (Exception, KeyboardInterrupt) as exc:
         print(
             f"Backfill interrupted by {type(exc).__name__}: {exc}",

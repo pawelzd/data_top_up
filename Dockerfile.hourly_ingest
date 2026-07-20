@@ -1,0 +1,20 @@
+# birdeye-hourly-ingest — hourly Solana OHLCV pull (Cloud Run Job).
+# Runs hourly_ingest.sh (thin wrapper over backfill_birdeye_ohlcv.py) to land the
+# last closed hour into core.token_ohlcv. Birdeye key from Secret Manager; BQ via
+# ADC (runtime SA). Build from the data_top_up repo root.
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
+
+COPY backfill_birdeye_ohlcv.py hourly_ingest.sh /app/
+RUN chmod +x /app/hourly_ingest.sh
+
+ENTRYPOINT ["/app/hourly_ingest.sh"]

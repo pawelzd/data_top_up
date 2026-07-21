@@ -28,11 +28,11 @@ gcloud run jobs deploy "$JOB" \
 JOB_RUN_URI="https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT}/jobs/${JOB}:run"
 gcloud scheduler jobs create http "${JOB}-hourly" \
   --project "$PROJECT" --location "$REGION" \
-  --schedule "2 * * * *" --time-zone "Etc/UTC" \
+  --schedule "1 * * * *" --time-zone "Etc/UTC" \
   --uri "$JOB_RUN_URI" --http-method POST \
   --oauth-service-account-email "$SCHEDULER_SA" \
   --oauth-token-scope "https://www.googleapis.com/auth/cloud-platform" \
   || gcloud scheduler jobs update http "${JOB}-hourly" \
-       --project "$PROJECT" --location "$REGION" --schedule "2 * * * *" --uri "$JOB_RUN_URI"
+       --project "$PROJECT" --location "$REGION" --schedule "1 * * * *" --uri "$JOB_RUN_URI"
 
 echo "[deploy] done. birdeye-hourly-ingest runs at :02 -> core.token_ohlcv"

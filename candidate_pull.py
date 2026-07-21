@@ -26,6 +26,7 @@ alert. The OHLCV backfill (step 3) is best-effort (logged, non-fatal).
 """
 from __future__ import annotations
 
+import datetime as dt
 import json
 import os
 import shlex
@@ -140,6 +141,86 @@ def append_snapshot(client: bigquery.Client, table: str, rows: list[dict],
     return inserted
 
 
+def ensure_candidate_table(client: bigquery.Client, table: str, location: str) -> None:
+    """Create the clean candidate-universe table (idempotent). Partitioned by pull
+    date + clustered by token so the hourly Raydium cost-probe can cheaply read the
+    latest weekly set. This is the DURABLE '~500 list' record the probe consumes —
+    raw.raw_birdeye_market_data is append-only with no as-of column, so a snapshot
+    cannot be identified there."""
+    ddl = f"""
+    CREATE TABLE IF NOT EXISTS `{table}` (
+      pulled_at TIMESTAMP NOT NULL,
+      week_start DATE,
+      rank INT64,
+      token_address STRING NOT NULL,
+      chain STRING,
+      symbol STRING,
+      name STRING,
+      decimals INT64,
+      market_cap FLOAT64,
+      liquidity FLOAT64,
+      volume_24h_usd FLOAT64,
+      price FLOAT64
+    )
+    PARTITION BY DATE(pulled_at)
+    CLUSTER BY token_address
+    """
+    client.query(ddl, location=location).result()
+
+
+def to_candidate_row(item: dict, chain: str, pulled_at: str, week_start: str,
+                     rank: int) -> dict:
+    """Clean, typed projection of a Token List V3 item for the candidate table."""
+    def _f(key: str):
+        v = item.get(key)
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+    dec = item.get("decimals")
+    return {
+        "pulled_at": pulled_at,
+        "week_start": week_start,
+        "rank": rank,
+        "token_address": item.get("address"),
+        "chain": chain,
+        "symbol": item.get("symbol"),
+        "name": item.get("name"),
+        "decimals": int(dec) if dec is not None else None,
+        "market_cap": _f("market_cap"),
+        "liquidity": _f("liquidity"),
+        "volume_24h_usd": _f("volume_24h_usd"),
+        "price": _f("price"),
+    }
+
+
+def persist_candidate_list(client: bigquery.Client, table: str, rows: list[dict],
+                           location: str) -> int:
+    """Append this run's clean candidate list (one tagged snapshot per weekly pull)."""
+    schema = [
+        bigquery.SchemaField("pulled_at", "TIMESTAMP", mode="REQUIRED"),
+        bigquery.SchemaField("week_start", "DATE"),
+        bigquery.SchemaField("rank", "INT64"),
+        bigquery.SchemaField("token_address", "STRING", mode="REQUIRED"),
+        bigquery.SchemaField("chain", "STRING"),
+        bigquery.SchemaField("symbol", "STRING"),
+        bigquery.SchemaField("name", "STRING"),
+        bigquery.SchemaField("decimals", "INT64"),
+        bigquery.SchemaField("market_cap", "FLOAT64"),
+        bigquery.SchemaField("liquidity", "FLOAT64"),
+        bigquery.SchemaField("volume_24h_usd", "FLOAT64"),
+        bigquery.SchemaField("price", "FLOAT64"),
+    ]
+    job_config = bigquery.LoadJobConfig(
+        write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
+        source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
+        schema=schema,
+    )
+    client.load_table_from_json(rows, table, job_config=job_config,
+                                location=location).result()
+    return len(rows)
+
+
 def new_tokens_without_ohlcv(client: bigquery.Client, discovered: list[str],
                              ohlcv_table: str, location: str) -> list[str]:
     """Discovered addresses that have no rows yet in the OHLCV table."""
@@ -208,6 +289,28 @@ def main() -> int:
     client = bigquery.Client(project=project)
     inserted = append_snapshot(client, market_table, rows, location)
     print(f"[candidate-pull] persisted {inserted} rows -> {market_table}")
+
+    # Persist a CLEAN, timestamped candidate list — the durable "~500" record the
+    # hourly Raydium cost-probe reads. Best-effort: the raw snapshot above already
+    # landed (membership-critical), so a failure here must NOT fail the weekly
+    # workflow — the probe simply falls back to the previous week's list.
+    candidate_table = _env("CANDIDATE_TABLE", f"{project}.raw.candidate_universe")
+    try:
+        now = dt.datetime.now(dt.timezone.utc)
+        pulled_at = now.isoformat()
+        today = now.date()
+        week_start = (today - dt.timedelta(days=today.weekday())).isoformat()  # Monday
+        cand_items = [it for it in items if it.get("address")]
+        cand_rows = [to_candidate_row(it, chain_store, pulled_at, week_start, i + 1)
+                     for i, it in enumerate(cand_items)]
+        ensure_candidate_table(client, candidate_table, location)
+        n_cand = persist_candidate_list(client, candidate_table, cand_rows, location)
+        print(f"[candidate-pull] persisted {n_cand} candidates -> {candidate_table} "
+              f"(pulled_at={pulled_at}, week_start={week_start})")
+    except Exception as exc:
+        print(f"[candidate-pull] WARNING: candidate_universe persist failed ({exc!r}); "
+              f"raw snapshot already landed, probe uses the previous week's list",
+              file=sys.stderr)
 
     if do_backfill:
         new_addrs = new_tokens_without_ohlcv(client, discovered, ohlcv_table, location)

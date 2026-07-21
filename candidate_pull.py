@@ -39,6 +39,9 @@ from typing import Any
 import requests
 from google.cloud import bigquery
 
+from obs_log import Logger, log_event
+
+SERVICE = "birdeye-candidate-pull"
 TOKEN_LIST_URL = os.getenv(
     "BIRDEYE_TOKEN_LIST_URL", "https://public-api.birdeye.so/defi/v3/token/list")
 
@@ -231,8 +234,8 @@ def new_tokens_without_ohlcv(client: bigquery.Client, discovered: list[str],
         existing = {r["token_address"] for r
                     in client.query(sql, location=location).result()}
     except Exception as exc:  # table missing / transient — treat all as new
-        print(f"[candidate-pull] could not read {ohlcv_table} ({exc!r}); "
-              f"treating all discovered tokens as new")
+        log_event(SERVICE, "ohlcv_read_failed", level="WARNING",
+                  table=ohlcv_table, error=repr(exc))
         existing = set()
     return [a for a in discovered if a not in existing]
 
@@ -246,21 +249,21 @@ def backfill_ohlcv(new_addrs: list[str], ohlcv_table: str) -> None:
         json.dump(new_addrs, f)
         tokens_path = f.name
     cmd = [sys.executable, script, "--tokens", tokens_path, "--table", ohlcv_table, *extra]
-    print(f"[candidate-pull] backfilling OHLCV for {len(new_addrs)} new token(s): "
-          f"{' '.join(cmd)}")
+    log_event(SERVICE, "backfill_start", n=len(new_addrs))
     try:
         subprocess.run(cmd, check=True)
     except subprocess.CalledProcessError as exc:
-        print(f"[candidate-pull] WARNING: OHLCV backfill failed ({exc}); snapshot "
-              f"already persisted, membership will pick these up once OHLCV lands")
+        log_event(SERVICE, "backfill_failed", level="WARNING", error=str(exc),
+                  note="snapshot already persisted; membership picks these up once OHLCV lands")
     finally:
         os.unlink(tokens_path)
 
 
 def main() -> int:
+    log = Logger(SERVICE)
     api_key = _env("BIRDEYE_API_KEY")
     if not api_key:
-        print("BIRDEYE_API_KEY is required", file=sys.stderr)
+        log.error("config_error", error="BIRDEYE_API_KEY is required")
         return 2
     project = _env("BQ_PROJECT_ID", "crypto-trading-474111")
     market_table = _env("MARKET_DATA_TABLE", f"{project}.raw.raw_birdeye_market_data")
@@ -275,20 +278,20 @@ def main() -> int:
     do_backfill = _env("BACKFILL_NEW_TOKENS", "true").lower() in ("1", "true", "yes")
 
     session = requests.Session()
-    print(f"[candidate-pull] Token List V3: sort_by={sort_by} min_liquidity={min_liquidity} "
-          f"min_market_cap={min_market_cap} max={max_tokens}")
+    log.info("cycle_start", sort_by=sort_by, min_liquidity=min_liquidity,
+             min_market_cap=min_market_cap, max_tokens=max_tokens)
     items = fetch_token_list(session, api_key, chain_header, sort_by,
                              min_liquidity, min_market_cap, max_tokens)
     if not items:
-        print("[candidate-pull] ERROR: Token List V3 returned no candidates", file=sys.stderr)
+        log.error("no_candidates", error="Token List V3 returned no candidates")
         return 1
     rows = [to_row(it, chain_store) for it in items if it.get("address")]
     discovered = [r["address"] for r in rows]
-    print(f"[candidate-pull] discovered {len(rows)} candidates")
+    log.info("discovered", n_candidates=len(rows))
 
     client = bigquery.Client(project=project)
     inserted = append_snapshot(client, market_table, rows, location)
-    print(f"[candidate-pull] persisted {inserted} rows -> {market_table}")
+    log.info("persisted_raw", rows=inserted, table=market_table)
 
     # Persist a CLEAN, timestamped candidate list — the durable "~500" record the
     # hourly Raydium cost-probe reads. Best-effort: the raw snapshot above already
@@ -305,20 +308,19 @@ def main() -> int:
                      for i, it in enumerate(cand_items)]
         ensure_candidate_table(client, candidate_table, location)
         n_cand = persist_candidate_list(client, candidate_table, cand_rows, location)
-        print(f"[candidate-pull] persisted {n_cand} candidates -> {candidate_table} "
-              f"(pulled_at={pulled_at}, week_start={week_start})")
+        log.info("persisted_candidates", rows=n_cand, table=candidate_table,
+                 pulled_at=pulled_at, week_start=week_start)
     except Exception as exc:
-        print(f"[candidate-pull] WARNING: candidate_universe persist failed ({exc!r}); "
-              f"raw snapshot already landed, probe uses the previous week's list",
-              file=sys.stderr)
+        log.warn("candidate_persist_failed", error=repr(exc),
+                 note="raw snapshot already landed; probe uses previous week's list")
 
     if do_backfill:
         new_addrs = new_tokens_without_ohlcv(client, discovered, ohlcv_table, location)
-        print(f"[candidate-pull] {len(new_addrs)} discovered token(s) have no OHLCV yet")
+        log.info("new_tokens_no_ohlcv", n=len(new_addrs))
         if new_addrs:
             backfill_ohlcv(new_addrs, ohlcv_table)
 
-    print("[candidate-pull] done")
+    log.info("cycle_done", candidates=len(rows), raw_rows=inserted)
     return 0
 
 

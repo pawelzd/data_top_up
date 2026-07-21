@@ -19,7 +19,8 @@ WORKDIR /app
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
-# candidate_pull subprocesses backfill_birdeye_ohlcv.py for new-token OHLCV.
-COPY candidate_pull.py backfill_birdeye_ohlcv.py /app/
+# candidate_pull subprocesses backfill_birdeye_ohlcv.py for new-token OHLCV;
+# obs_log.py is the vendored unified structured logger.
+COPY candidate_pull.py backfill_birdeye_ohlcv.py obs_log.py /app/
 
 ENTRYPOINT ["python", "/app/candidate_pull.py"]

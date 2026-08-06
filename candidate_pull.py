@@ -259,45 +259,32 @@ def backfill_ohlcv(new_addrs: list[str], ohlcv_table: str) -> None:
         os.unlink(tokens_path)
 
 
-def main() -> int:
-    log = Logger(SERVICE)
-    api_key = _env("BIRDEYE_API_KEY")
-    if not api_key:
-        log.error("config_error", error="BIRDEYE_API_KEY is required")
-        return 2
-    project = _env("BQ_PROJECT_ID", "crypto-trading-474111")
-    market_table = _env("MARKET_DATA_TABLE", f"{project}.raw.raw_birdeye_market_data")
-    ohlcv_table = _env("OHLCV_TABLE", f"{project}.core.token_ohlcv")
-    location = _env("BIGQUERY_LOCATION", "europe-central2")
-    chain_store = _env("CHAIN", "sol")            # stored in the `chain` column
-    chain_header = _env("BIRDEYE_CHAIN", "solana")  # Birdeye x-chain header
-    sort_by = _env("SORT_BY", "volume_24h_usd")
-    min_liquidity = float(_env("MIN_LIQUIDITY_USD", "50000"))
-    min_market_cap = float(_env("MIN_MARKET_CAP_USD", "0"))  # 0 = no floor; rule applies it
-    max_tokens = int(_env("MAX_TOKENS", "500"))
-    do_backfill = _env("BACKFILL_NEW_TOKENS", "true").lower() in ("1", "true", "yes")
+def pull_chain(client: bigquery.Client, session: requests.Session, api_key: str,
+               chain_store: str, chain_header: str, market_table: str,
+               candidate_table: str, location: str, sort_by: str,
+               min_liquidity: float, min_market_cap: float, max_tokens: int,
+               log: "Logger", write_market_snapshot: bool = True) -> tuple[list[str], int]:
+    """Pull one chain: fetch the Birdeye token list and persist the timestamped
+    candidate list. Returns (discovered_addresses, n_candidates); best-effort on
+    the candidate write.
 
-    session = requests.Session()
-    log.info("cycle_start", sort_by=sort_by, min_liquidity=min_liquidity,
-             min_market_cap=min_market_cap, max_tokens=max_tokens)
+    write_market_snapshot: append to raw_birdeye_market_data too. Kept SOLANA-ONLY
+    by the caller — the stg_birdeye_market_data model reads that raw table WITHOUT
+    a chain filter and feeds the Solana OHLCV/feature pipeline, so EVM rows there
+    would pollute it. The candidate_universe (0x-filtered downstream) already
+    carries mcap/liquidity/volume/price per token, so nothing is lost for the
+    other chains."""
     items = fetch_token_list(session, api_key, chain_header, sort_by,
                              min_liquidity, min_market_cap, max_tokens)
     if not items:
-        log.error("no_candidates", error="Token List V3 returned no candidates")
-        return 1
+        log.warn("no_candidates_chain", chain=chain_store, chain_header=chain_header)
+        return [], 0
     rows = [to_row(it, chain_store) for it in items if it.get("address")]
     discovered = [r["address"] for r in rows]
-    log.info("discovered", n_candidates=len(rows))
-
-    client = bigquery.Client(project=project)
-    inserted = append_snapshot(client, market_table, rows, location)
-    log.info("persisted_raw", rows=inserted, table=market_table)
-
-    # Persist a CLEAN, timestamped candidate list — the durable "~500" record the
-    # hourly Raydium cost-probe reads. Best-effort: the raw snapshot above already
-    # landed (membership-critical), so a failure here must NOT fail the weekly
-    # workflow — the probe simply falls back to the previous week's list.
-    candidate_table = _env("CANDIDATE_TABLE", f"{project}.raw.candidate_universe")
+    if write_market_snapshot:
+        inserted = append_snapshot(client, market_table, rows, location)
+        log.info("persisted_raw", chain=chain_store, rows=inserted, table=market_table)
+    n_cand = 0
     try:
         now = dt.datetime.now(dt.timezone.utc)
         pulled_at = now.isoformat()
@@ -308,19 +295,73 @@ def main() -> int:
                      for i, it in enumerate(cand_items)]
         ensure_candidate_table(client, candidate_table, location)
         n_cand = persist_candidate_list(client, candidate_table, cand_rows, location)
-        log.info("persisted_candidates", rows=n_cand, table=candidate_table,
+        log.info("persisted_candidates", chain=chain_store, rows=n_cand,
                  pulled_at=pulled_at, week_start=week_start)
     except Exception as exc:
-        log.warn("candidate_persist_failed", error=repr(exc),
+        log.warn("candidate_persist_failed", chain=chain_store, error=repr(exc),
                  note="raw snapshot already landed; probe uses previous week's list")
+    return discovered, n_cand
 
-    if do_backfill:
-        new_addrs = new_tokens_without_ohlcv(client, discovered, ohlcv_table, location)
+
+def main() -> int:
+    log = Logger(SERVICE)
+    api_key = _env("BIRDEYE_API_KEY")
+    if not api_key:
+        log.error("config_error", error="BIRDEYE_API_KEY is required")
+        return 2
+    project = _env("BQ_PROJECT_ID", "crypto-trading-474111")
+    market_table = _env("MARKET_DATA_TABLE", f"{project}.raw.raw_birdeye_market_data")
+    ohlcv_table = _env("OHLCV_TABLE", f"{project}.core.token_ohlcv")
+    location = _env("BIGQUERY_LOCATION", "europe-central2")
+    sort_by = _env("SORT_BY", "volume_24h_usd")
+    min_liquidity = float(_env("MIN_LIQUIDITY_USD", "50000"))
+    min_market_cap = float(_env("MIN_MARKET_CAP_USD", "0"))  # 0 = no floor; rule applies it
+    max_tokens = int(_env("MAX_TOKENS", "500"))
+    do_backfill = _env("BACKFILL_NEW_TOKENS", "true").lower() in ("1", "true", "yes")
+    candidate_table = _env("CANDIDATE_TABLE", f"{project}.raw.candidate_universe")
+
+    # Chains to pull, as "store:header" pairs (store = the `chain` column value,
+    # header = Birdeye x-chain). Default = the 4 chains Birdeye's token-list
+    # endpoint supports (arb/op/poly/avax return HTTP 400). A legacy explicit
+    # CHAIN/BIRDEYE_CHAIN still forces single-chain, for back-compat.
+    if _env("CHAIN") or _env("BIRDEYE_CHAIN"):
+        chains = [(_env("CHAIN", "sol"), _env("BIRDEYE_CHAIN", "solana"))]
+    else:
+        chains = [tuple(p.split(":", 1)) for p in
+                  _env("CHAINS", "sol:solana,eth:ethereum,base:base,bsc:bsc").split(",")
+                  if ":" in p]
+
+    session = requests.Session()
+    client = bigquery.Client(project=project)
+    log.info("cycle_start", chains=[c[0] for c in chains], sort_by=sort_by,
+             min_liquidity=min_liquidity, min_market_cap=min_market_cap, max_tokens=max_tokens)
+
+    # Only the live-traded Solana list drives the OHLCV backfill; other chains are
+    # captured (candidate + raw market snapshot) for future cross-chain use.
+    sol_discovered: list[str] = []
+    total_cand = 0
+    for chain_store, chain_header in chains:
+        try:
+            discovered, n_cand = pull_chain(
+                client, session, api_key, chain_store, chain_header, market_table,
+                candidate_table, location, sort_by, min_liquidity, min_market_cap,
+                max_tokens, log, write_market_snapshot=(chain_store == "sol"))
+            total_cand += n_cand
+            if chain_store == "sol":
+                sol_discovered = discovered
+        except Exception as exc:  # one chain failing must not kill the others
+            log.error("chain_failed", chain=chain_store, error=repr(exc))
+
+    if do_backfill and sol_discovered:
+        new_addrs = new_tokens_without_ohlcv(client, sol_discovered, ohlcv_table, location)
         log.info("new_tokens_no_ohlcv", n=len(new_addrs))
         if new_addrs:
             backfill_ohlcv(new_addrs, ohlcv_table)
 
-    log.info("cycle_done", candidates=len(rows), raw_rows=inserted)
+    if total_cand == 0:
+        log.error("no_candidates", error="no candidates persisted for any chain")
+        return 1
+    log.info("cycle_done", chains=len(chains), total_candidates=total_cand)
     return 0
 
 

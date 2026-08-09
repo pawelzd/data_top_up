@@ -7,9 +7,9 @@ external Databricks `public_tokens_to_monitor` stream into a Cloud Run job:
 
   1. DISCOVER — pull Birdeye Token List V3 (a deliberately LOOSE candidate
      screen: top-by-24h-volume with a pool-liquidity floor). This is NOT the
-     universe; it is the set the membership rule gets evaluated on. The actual
-     mktcap>=$20M / volume-rank<=120 rule is applied downstream by the v1 dbt
-     model, never here.
+     universe; it is the set the downstream membership rule gets evaluated on
+     (the rule lives in the dbt model, never here — see the live-universe spec
+     doc referenced above for its definition).
   2. PERSIST — append the snapshot to `raw.raw_birdeye_market_data`, the exact
      table the dbt `stg_birdeye_market_data` model already reads as its backfill
      source. So NO dbt change is needed — this simply supplies the source the

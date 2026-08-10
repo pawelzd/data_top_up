@@ -1,0 +1,11 @@
+# birdeye candles ingest (15m sol + 1H evm) (added 2026-08-10).
+# Separate entrypoint from the hourly ingest by design (DEPLOYMENT.md §5 rule 1).
+FROM python:3.11-slim
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
+COPY ingest_candles.py obs_log.py /app/
+ENTRYPOINT ["python", "/app/ingest_candles.py"]

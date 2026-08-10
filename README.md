@@ -139,3 +139,50 @@ duplicate check, but this may create duplicate rows:
 ```powershell
 python .\backfill_birdeye_ohlcv.py --skip-existing-check
 ```
+
+---
+
+## Parameterised candles ingest — 15m sol + hourly EVM (added 2026-08-10, challenger project)
+
+`ingest_candles.py` + `Dockerfile.ingest_candles` → two Cloud Run jobs:
+**`birdeye-15m-ingest`** (INTERVAL=15m, sol → `core.token_ohlcv_15m`), Scheduler
+`birdeye-15m-ingest-q` at :05/:20/:35/:50 UTC; and **`birdeye-evm-ingest`**
+(INTERVAL=1H, CHAINS=eth|base|bsc → `core.token_ohlcv_evm`), Scheduler
+`birdeye-evm-ingest-q` at :25 UTC (slots chosen to avoid the
+existing hourly chain at :01/:02, dbt :08, shadow :12).
+
+- **Target**: `core.token_ohlcv_15m` (day-partitioned, clustered chain+token_address,
+  same column schema as `core.token_ohlcv`). Created 2026-08-10 by cross-region copy of
+  the frozen `core_prices.token_ohlcv_15m` (EU, last bar 2026-01-11) into
+  europe-central2, so 15m data is joinable with the live hourly store; the EU table was
+  left untouched as an archive.
+- **Why a separate entrypoint** rather than extending `backfill_birdeye_ohlcv.py`: that
+  script hard-codes `type="1H"` and feeds live production; per DEPLOYMENT.md §5 rule 1
+  this change is purely additive and cannot affect the hourly path.
+- **Idempotent**: skips existing `(token_address, price_timestamp)` in the lookback
+  window, so re-runs/overlaps can't duplicate. `HOURS_BACK=6` in steady state; raise it
+  for gap fills.
+- **Bulk writes**: >20k rows use a load job, falling back to chunked streaming if the
+  runtime SA lacks dataset-level `tables.create` (it holds table-level rights only).
+  One-time gap fill of 2026-07-20→08-10 (240,136 rows) was run locally on 2026-08-10.
+- **Rate**: `RATE_LIMIT_RPM=600`, top-500 tokens/run — polite alongside the hourly ingest.
+- Runtime SA: `challenger-paper@` with `roles/bigquery.dataEditor` on the target table only.
+
+Table state after commissioning: 51.49M rows, coverage 2021-12-09 → current hour.
+
+### EVM hourly (B2a, 2026-08-10)
+
+`core.token_ohlcv_evm` — NEW table, deliberately separate from `core.token_ohlcv`:
+that table has only ever contained `chain='sol'`, and silently introducing eth/base/bsc
+rows would change the universe of any consumer that does not filter by chain
+(DEPLOYMENT.md §5 rule 1). A UNION view can be added if a combined surface is ever wanted.
+
+Contents: 13.98M rows — 13.09M migrated from `core_prices.token_ohlcv_1h` (EU, chains
+eth/base/bsc, history to 2025-10-22; source left untouched) + 631,358 rows of real OHLCV
+backfill for 2026-04→08 pulled with this script. Coverage now runs to the current hour.
+
+Gotchas fixed while commissioning (both were latent in the 15m path too):
+- `num()` returned Python `None`, which `str()` turned into the literal `"None"` —
+  BigQuery rejects that as an invalid NUMERIC (surfaced on sparse EVM `volume`). It now
+  emits JSON null.
+- `CHAINS` accepts `|` as well as `,` (commas are awkward in `gcloud --set-env-vars`).

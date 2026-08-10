@@ -186,3 +186,32 @@ Gotchas fixed while commissioning (both were latent in the 15m path too):
   BigQuery rejects that as an invalid NUMERIC (surfaced on sparse EVM `volume`). It now
   emits JSON null.
 - `CHAINS` accepts `|` as well as `,` (commas are awkward in `gcloud --set-env-vars`).
+
+### Ingest universe decoupled from the model's feature view (B3, 2026-08-10)
+
+**Symptom**: `core.token_ohlcv` breadth fell 1306 → 385 distinct tokens/day on 2026-07-21 and
+decayed to ~150 by 2026-08-10. The job itself was healthy the whole time (exit 0 hourly).
+
+**Cause**: `hourly_ingest.sh` defaulted `TOKENS_QUERY` to
+`SELECT DISTINCT token_address FROM rl_prod.rl_prod_inference_features_v` — so the estate's
+*ingestion* breadth was bound to one model's *inference* universe. That model legitimately
+narrowed to its top ~120 tokens; ingestion should not have followed it down.
+
+**Fix**: `TOKENS_QUERY` set on the `birdeye-hourly-ingest` job to a UNION that is a strict
+superset — the model's view is kept as one leg, so its coverage is unchanged by construction:
+
+    rl_prod.rl_prod_inference_features_v                                  (~120, unchanged)
+  ∪ raw.candidate_universe, pulled_at >= now-21d, chain='sol'             (~1,187)
+  ∪ core.token_ohlcv_15m, price_timestamp >= now-7d, chain='sol'          (~681)
+  → ~1,300-1,400 unique tokens/run, matching pre-collapse breadth.
+
+Backbone is the estate's own weekly discovery pull (`birdeye-candidate-pull-weekly`), so
+breadth is now self-sustaining and cannot be silently narrowed by a downstream consumer.
+Cost: ~1,400 requests/hour at RATE_LIMIT_RPM=800 (~2 min) — the pre-collapse norm.
+
+**Rollback** (restores the old behaviour exactly — the job previously set no TOKENS_QUERY):
+
+    gcloud run jobs update birdeye-hourly-ingest --region=europe-central2 \
+      --remove-env-vars TOKENS_QUERY
+
+Applied as an env-var change only; image, schedule and code are untouched.

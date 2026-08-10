@@ -17,11 +17,18 @@ echo "[deploy] building $IMAGE (Cloud Build — no local Docker)"
 gcloud builds submit --project "$PROJECT" --config cloudbuild.yaml \
   --substitutions="_DOCKERFILE=Dockerfile.hourly_ingest,_IMAGE=${IMAGE}" .
 
+# NOTE: TOKENS_QUERY is set out-of-band on the live job (the universe-breadth
+# decoupling) and is intentionally NOT in this --set-env-vars list. --set-env-vars
+# REPLACES all env, so re-running this deploy as-is would DROP TOKENS_QUERY and
+# revert breadth. Prefer `gcloud run jobs update --update-env-vars` for in-place
+# changes; if you must re-run this, re-add TOKENS_QUERY here first.
+# OHLCV_API=v1 selects the cheaper /defi/ohlcv endpoint (flat 35 CU vs 60-120;
+# byte-identical candles at this 3h window). Set to v3 to roll back.
 gcloud run jobs deploy "$JOB" \
   --project "$PROJECT" --region "$REGION" \
   --image "$IMAGE" --service-account "$RUNTIME_SA" \
   --max-retries 1 --task-timeout 1800 \
-  --set-env-vars "BIGQUERY_TABLE=${PROJECT}.core.token_ohlcv,BIGQUERY_LOCATION=europe-central2,HOURS_BACK=3,RATE_LIMIT_RPM=800" \
+  --set-env-vars "BIGQUERY_TABLE=${PROJECT}.core.token_ohlcv,BIGQUERY_LOCATION=europe-central2,HOURS_BACK=3,RATE_LIMIT_RPM=800,OHLCV_API=v1" \
   --set-secrets "BIRDEYE_API_KEY=birdeye-api-key:latest"
 
 # Hourly trigger at :02 — Cloud Scheduler -> Cloud Run Jobs API (jobs.run).

@@ -52,6 +52,7 @@ if python3 backfill_birdeye_ohlcv.py \
   --bigquery-location "${BIGQUERY_LOCATION:-europe-central2}" \
   --rate-limit-rpm "${RATE_LIMIT_RPM:-100}" \
   --flush-row-threshold "${FLUSH_ROW_THRESHOLD:-1000}" \
+  --ohlcv-api "${OHLCV_API:-v3}" \
   ${EXTRA_ARGS:-}; then rc=0; else rc=$?; fi
 
 if [ "$rc" -eq 0 ]; then

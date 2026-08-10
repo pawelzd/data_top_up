@@ -25,9 +25,19 @@ from google.api_core.exceptions import Forbidden, NotFound
 from google.cloud import bigquery
 
 
-BIRDEYE_OHLCV_URL = "https://public-api.birdeye.so/defi/v3/ohlcv"
+# Two OHLCV endpoints, identical candle payload (verified byte-parity on o/h/l/c/v):
+#   v3 (/defi/v3/ohlcv): 60-120 CU/call, returns up to 5000 candles/call.
+#   v1 (/defi/ohlcv):    flat 35 CU/call, returns up to 1000 candles/call.
+# For SHORT windows (e.g. the hourly job's 3h look-back, one call/token) v1 is
+# ~2x cheaper for the same data. For LONG backfills v3 wins (fewer calls). So the
+# endpoint is selectable; default stays v3 so every existing invocation is
+# byte-identical. See --ohlcv-api.
+BIRDEYE_OHLCV_URL_V3 = "https://public-api.birdeye.so/defi/v3/ohlcv"
+BIRDEYE_OHLCV_URL_V1 = "https://public-api.birdeye.so/defi/ohlcv"
+BIRDEYE_OHLCV_URL = BIRDEYE_OHLCV_URL_V3  # back-compat default
 DEFAULT_START = "2026-02-05"
-MAX_CANDLES_PER_REQUEST = 5000
+MAX_CANDLES_PER_REQUEST = 5000       # v3 cap; v1 cap is 1000 (see OHLCV_MAX_CANDLES)
+OHLCV_MAX_CANDLES = {"v3": 5000, "v1": 1000}
 SECONDS_PER_HOUR = 3600
 BIGQUERY_NUMERIC_QUANT = Decimal("0.000000001")
 
@@ -104,6 +114,18 @@ def parse_args() -> argparse.Namespace:
         "--api-key",
         default=os.getenv("BIRDEYE_API_KEY"),
         help="Birdeye API key. Defaults to BIRDEYE_API_KEY.",
+    )
+    parser.add_argument(
+        "--ohlcv-api",
+        choices=("v1", "v3"),
+        default=os.getenv("OHLCV_API", "v3"),
+        help=(
+            "Birdeye OHLCV endpoint. v3 (default): /defi/v3/ohlcv, 60-120 CU/call, "
+            "up to 5000 candles/call. v1: /defi/ohlcv, flat 35 CU/call, up to 1000 "
+            "candles/call — ~2x cheaper for SHORT windows (e.g. hourly job), so it "
+            "caps windows at 1000h. Candle payload is byte-identical. "
+            "Defaults to OHLCV_API or v3."
+        ),
     )
     parser.add_argument(
         "--chain",
@@ -592,10 +614,14 @@ def write_gap_tasks_csv(
             )
 
 
-def iter_time_windows(start_dt: datetime, end_dt: datetime) -> List[Tuple[int, int]]:
+def iter_time_windows(
+    start_dt: datetime,
+    end_dt: datetime,
+    max_candles: int = MAX_CANDLES_PER_REQUEST,
+) -> List[Tuple[int, int]]:
     start_ts = int(start_dt.timestamp())
     end_ts = int(end_dt.timestamp())
-    max_window_seconds = MAX_CANDLES_PER_REQUEST * SECONDS_PER_HOUR
+    max_window_seconds = max_candles * SECONDS_PER_HOUR
 
     windows: List[Tuple[int, int]] = []
     cursor = start_ts
@@ -615,6 +641,8 @@ def request_birdeye_ohlcv(
     time_from: int,
     time_to: int,
     max_attempts: int = 5,
+    url: str = BIRDEYE_OHLCV_URL_V3,
+    use_range_mode: bool = True,
 ) -> List[dict]:
     headers = {
         "X-API-KEY": api_key,
@@ -627,12 +655,14 @@ def request_birdeye_ohlcv(
         "currency": currency,
         "time_from": time_from,
         "time_to": time_to,
-        "mode": "range",
     }
+    # `mode=range` is a v3-only parameter; the v1 endpoint 400s on it.
+    if use_range_mode:
+        params["mode"] = "range"
 
     for attempt in range(1, max_attempts + 1):
         response = session.get(
-            BIRDEYE_OHLCV_URL, headers=headers, params=params, timeout=30
+            url, headers=headers, params=params, timeout=30
         )
         if response.status_code == 429 or 500 <= response.status_code < 600:
             if attempt == max_attempts:
@@ -982,6 +1012,10 @@ def main() -> int:
     )
     print(f"BigQuery chain value: {args.chain}; Birdeye API chain: {args.api_chain}")
 
+    ohlcv_url = BIRDEYE_OHLCV_URL_V1 if args.ohlcv_api == "v1" else BIRDEYE_OHLCV_URL_V3
+    ohlcv_max_candles = OHLCV_MAX_CANDLES[args.ohlcv_api]
+    print(f"OHLCV endpoint: {args.ohlcv_api} ({ohlcv_url}); max {ohlcv_max_candles} candles/call")
+
     existing_keys: Set[Tuple[str, int, str]] = set()
     if args.skip_existing_check:
         print("Skipping existing-row check; duplicate rows may be appended.")
@@ -1106,7 +1140,9 @@ def main() -> int:
                 for row_chain, task_start_dt, task_end_dt in fetch_tasks:
                     task_start_ts = int(task_start_dt.timestamp())
                     task_end_ts = int(task_end_dt.timestamp())
-                    for time_from, time_to in iter_time_windows(task_start_dt, task_end_dt):
+                    for time_from, time_to in iter_time_windows(
+                        task_start_dt, task_end_dt, max_candles=ohlcv_max_candles
+                    ):
                         items = request_birdeye_ohlcv(
                             session=session,
                             api_key=args.api_key,
@@ -1115,6 +1151,8 @@ def main() -> int:
                             currency=args.currency,
                             time_from=time_from,
                             time_to=time_to,
+                            url=ohlcv_url,
+                            use_range_mode=(args.ohlcv_api == "v3"),
                         )
                         fetched_candles += len(items)
 

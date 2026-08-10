@@ -134,10 +134,12 @@ def main() -> int:
             continue
         have = existing_keys(t_from, t_to, chain)
         for i, addr in enumerate(toks):
-            d = be_get("/defi/v3/ohlcv", dict(address=addr, type=INTERVAL,
-                                              time_from=int(t_from.timestamp()),
-                                              time_to=int(t_to.timestamp()),
-                                              currency="usd"), be_chain=be_chain)
+            # /defi/ohlcv is a flat 35 CU; /defi/v3/ohlcv is 60-120 CU (scales with response
+            # size). Identical candle payload at our window sizes -> use the cheap one.
+            d = be_get("/defi/ohlcv", dict(address=addr, type=INTERVAL,
+                                           time_from=int(t_from.timestamp()),
+                                           time_to=int(t_to.timestamp()),
+                                           currency="usd"), be_chain=be_chain)
             items = ((d or {}).get("data") or {}).get("items") or []
             for it in items:
                 ts = int(it.get("unix_time") or it.get("unixTime") or 0)

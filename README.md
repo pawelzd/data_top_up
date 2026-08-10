@@ -201,9 +201,24 @@ narrowed to its top ~120 tokens; ingestion should not have followed it down.
 superset — the model's view is kept as one leg, so its coverage is unchanged by construction:
 
     rl_prod.rl_prod_inference_features_v                                  (~120, unchanged)
-  ∪ raw.candidate_universe, pulled_at >= now-21d, chain='sol'             (~1,187)
-  ∪ core.token_ohlcv_15m, price_timestamp >= now-7d, chain='sol'          (~681)
-  → ~1,300-1,400 unique tokens/run, matching pre-collapse breadth.
+  ∪ raw.candidate_universe, most recent 8d of pulls, chain='sol'          (~500)
+  ∪ core.token_ohlcv tokens with >= $200k dollar-volume over 30d          (~647)
+  → ~700-800 unique tokens/run.
+
+**Why not simply "everything" (~1,477 tokens)?** Measured 2026-08-10: of the 1,477 tokens
+with bars in the last pre-collapse week, only 543 traded >= $50k/7d and 280 cleared the
+$350k strategy floor — ~994 are zombies. Ingesting them costs API budget and buys nothing.
+
+**Why not just the model's ~120?** Measured over 2026-04→07: **28-75 tokens per week newly
+cross the $350k floor**. A token becomes tradeable only once it has trailing history
+(7d volume, age >= 7d, >= 100 nonzero-volume hours), so ingest must cover the *pipeline* of
+near-eligible names, not just today's eligible ones. Ingesting narrowly also truncates the
+death tail — rugs and fades must stay in the record or backtests inflate (they are the
+left tail challenger's scoring depends on).
+
+The $200k/30d floor is the compromise: ~2.5x headroom below the trading floor (so newcomers
+arrive with history), keeps dying tokens while they fade, and drops the zombie half of the
+tail. Roughly half the API cost of an unfiltered universe.
 
 Backbone is the estate's own weekly discovery pull (`birdeye-candidate-pull-weekly`), so
 breadth is now self-sustaining and cannot be silently narrowed by a downstream consumer.

@@ -247,3 +247,29 @@ Worth noting for future work: a single malformed address anywhere in the univers
 entire hourly cycle. Making the fetch loop skip-and-continue on HTTP 400 would be a genuine
 robustness improvement to the hourly script (not done here — that script is untouched by
 design).
+
+### Event-driven wide pull (`birdeye-gate-wide-ingest`, 2026-08-11)
+
+`ingest_candles.py` gained two optional BQ-driven controls, both costing 0 CU:
+
+| env | effect |
+|---|---|
+| `GATE_SQL` | run only if the query's first column is TRUE; otherwise exit 0 making **no** Birdeye calls |
+| `TOKENS_SQL` | take the universe from BigQuery instead of `/defi/tokenlist` (also saves 30 CU/call) |
+
+**Why**: measurement on 2026-08-11 showed that truncating the ingest universe to save CU is
+the wrong lever for dislocation strategies — in strong market windows the top-173 tokens by
+volume carry 75-100% of strategy PnL, but in a weak window they carried **0%**: the entire
+edge sat in ranks 174-266. Truncation therefore biases validation optimistic in good regimes
+and blind in marginal ones.
+
+**Design**: the strategies can only act when SOL's 24h return <= -3% ("gate open"). So the
+baseline hourly ingest stays narrow, and this job pulls the wide tier (volume ranks ~150-420)
+at 15m resolution ONLY during gate-open hours. The gate has been shut for 12+ days and
+historically opens ~5-25% of hours, so average cost is ~10-25k CU/day instead of ~135k for
+ingesting the wide tier permanently — same evidence, ~85% cheaper.
+
+Job: `birdeye-gate-wide-ingest`, Scheduler `birdeye-gate-wide-q` at :35 UTC hourly,
+HOURS_BACK=6 (captures the dip forming, not just the trigger hour), target
+`core.token_ohlcv_15m`. Runtime SA needs `bigquery.dataViewer` on `core.token_ohlcv` for the
+gate/universe queries (granted 2026-08-11).

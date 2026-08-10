@@ -58,6 +58,11 @@ BE_CHAIN = os.getenv("BIRDEYE_CHAIN", "solana")
 HOURS_BACK = int(os.getenv("HOURS_BACK", "6"))
 TOP_N = int(os.getenv("TOP_N", "500"))
 RPM = int(os.getenv("RATE_LIMIT_RPM", "600"))
+# Optional BQ-driven control plane (costs 0 CU, unlike /defi/tokenlist at 30 CU/call):
+#   TOKENS_SQL  universe from BigQuery instead of the Birdeye toplist
+#   GATE_SQL    run only when this query's first column is TRUE (event-driven ingest)
+TOKENS_SQL = os.getenv("TOKENS_SQL")
+GATE_SQL = os.getenv("GATE_SQL")
 INTERVAL = os.getenv("INTERVAL", "15m")
 CANDLE_SECONDS = {"15m": 900, "1H": 3600, "1h": 3600}.get(INTERVAL, 900)
 _chains_raw = os.getenv("CHAINS", "").replace("|", ",")   # "|" allowed: commas are
@@ -90,6 +95,10 @@ def be_get(path: str, params: dict, be_chain: str = None, retries: int = 4):
 
 
 def universe(n: int, be_chain: str) -> list[str]:
+    if TOKENS_SQL:
+        toks = [r[0] for r in bq.query(TOKENS_SQL).result() if r[0]]
+        log.event("universe_from_sql", n=len(toks))
+        return toks
     out = []
     for off in range(0, n, 50):
         d = be_get("/defi/tokenlist", dict(sort_by="v24hUSD", sort_type="desc",
@@ -123,6 +132,16 @@ def num(v):
 def main() -> int:
     t_to = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
     t_from = t_to - timedelta(hours=HOURS_BACK)
+    if GATE_SQL:
+        try:
+            open_ = bool(list(bq.query(GATE_SQL).result())[0][0])
+        except Exception as e:
+            log.error("gate_sql_failed", error=str(e)[:200])
+            return 1
+        if not open_:
+            log.event("gate_closed_skip", detail="no Birdeye calls made")
+            return 0
+        log.event("gate_open", detail="proceeding with wide pull")
     log.event("run_start", table=TABLE, interval=INTERVAL,
               chains=[c for c, _ in CHAINS], hours_back=HOURS_BACK,
               window=f"{t_from.isoformat()}..{t_to.isoformat()}")

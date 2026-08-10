@@ -231,10 +231,13 @@ Cost: ~1,400 requests/hour at RATE_LIMIT_RPM=800 (~2 min) — the pre-collapse n
 
 Applied as an env-var change only; image, schedule and code are untouched.
 
-**Address guard (2026-08-10)**: the broader universe surfaced a latent landmine — a bogus
-`btcusdt` row that has long existed in `core.token_ohlcv`. Birdeye returns HTTP 400
-("address is invalid format") for it and `backfill_birdeye_ohlcv.py` raises RuntimeError,
-aborting the whole run (it never triggered before because the model's view does not contain
+**Address guard (2026-08-10)**: the broader universe surfaced a latent landmine — the
+`btcusdt` row in `core.token_ohlcv`. **This row is NOT junk: do not delete it.** It is the
+estate's BTC reference series (49,134 hourly rows, 2021-01-01 → current hour), written as a
+pseudo-token by the `btc-data` repo's `btc-data-ingest-hourly` job (`TOKEN_ADDRESS=btcusdt`,
+`CHAIN=sol`). It simply must never be sent to Birdeye, which returns HTTP 400
+("address is invalid format"); `backfill_birdeye_ohlcv.py` then raises RuntimeError and
+aborts the whole run (it never triggered before because the model's view does not contain
 it). `TOKENS_QUERY` now ends with a base58 sanity filter:
 
     AND LENGTH(token_address) BETWEEN 32 AND 44

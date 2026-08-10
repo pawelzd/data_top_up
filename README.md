@@ -230,3 +230,17 @@ Cost: ~1,400 requests/hour at RATE_LIMIT_RPM=800 (~2 min) — the pre-collapse n
       --remove-env-vars TOKENS_QUERY
 
 Applied as an env-var change only; image, schedule and code are untouched.
+
+**Address guard (2026-08-10)**: the broader universe surfaced a latent landmine — a bogus
+`btcusdt` row that has long existed in `core.token_ohlcv`. Birdeye returns HTTP 400
+("address is invalid format") for it and `backfill_birdeye_ohlcv.py` raises RuntimeError,
+aborting the whole run (it never triggered before because the model's view does not contain
+it). `TOKENS_QUERY` now ends with a base58 sanity filter:
+
+    AND LENGTH(token_address) BETWEEN 32 AND 44
+    AND REGEXP_CONTAINS(token_address, r'^[1-9A-HJ-NP-Za-km-z]+$')
+
+Worth noting for future work: a single malformed address anywhere in the universe kills an
+entire hourly cycle. Making the fetch loop skip-and-continue on HTTP 400 would be a genuine
+robustness improvement to the hourly script (not done here — that script is untouched by
+design).

@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(gcloud:*)",
+      "Bash(bq:*)",
+      "Bash(gsutil:*)",
+      "Bash(terraform:*)",
+      "Bash(docker:*)",
+      "Bash(kubectl:*)",
+      "Bash(sudo:*)",
+      "Bash(git push:*)",
+      "Bash(rm -rf /:*)",
+      "Bash(launchctl unload:*)",
+      "Bash(launchctl remove:*)",
+      "Bash(launchctl bootout:*)",
+      "Read(//Users/pawelzdanowicz/Projects/estate/**)",
+      "Edit(//Users/pawelzdanowicz/Projects/estate/**)",
+      "Write(//Users/pawelzdanowicz/Projects/estate/**)",
+      "Read(//Users/pawelzdanowicz/.config/gcloud/**)",
+      "Read(//Users/pawelzdanowicz/.ssh/**)",
+      "Read(//Users/pawelzdanowicz/Projects/challenger/**)",
+      "Read(//Users/pawelzdanowicz/Projects/corebook/**)",
+      "Read(//Users/pawelzdanowicz/Projects/rl-crypto/**)"
+    ]
+  }
+}

@@ -62,10 +62,130 @@ supervised session.
 **Not asked:** do not change ingest universes, cadences or budgets. Those moved
 recently on operator decisions (breadth split, 2026-08-12) and are not yours to
 revisit here.
-- **Status:** OPEN
+
+**Response (data_top_up, 2026-08-12, unattended session):**
+1. **Idempotent write — code complete.** New `bq_merge_upsert.py`: both
+   writers now upsert via `MERGE ... USING (SELECT * FROM UNNEST(@rows)) ...
+   WHEN NOT MATCHED THEN INSERT`, keyed on `(token_address, price_timestamp,
+   chain)`, instead of read-existing-then-`WRITE_APPEND`. BigQuery serializes
+   DML against the same destination table, so a second concurrent MERGE with
+   an overlapping key set runs after the first commits and sees its rows
+   already there. Wired into `ingest_candles.py`'s `write_rows()` and
+   `backfill_birdeye_ohlcv.py`'s `append_rows()` (which `candidate_pull.py`
+   also inherits, since it shells out to that script). Chose MERGE over a
+   lock/lease table because it's a single mechanism that's atomic by
+   construction, rather than a second piece of state that itself needs to be
+   race-free.
+2. **Overlap structurally impossible — same mechanism.** Because the write
+   itself is now atomic on the natural key, an overlapping backfill can no
+   longer create a duplicate row regardless of timing — no separate lock or
+   pause/resume procedure needed. (It does not dedupe wasted *Birdeye* CU from
+   two jobs both fetching the same hour — the existing existing-keys
+   pre-filter still cuts that in the common case, but two truly concurrent
+   runs will each pay for their own fetch. Only DB duplication was in scope
+   here per "Not asked.")
+3. **ESTATE.md — written.** All 5 components GOV listed, plus
+   `birdeye-evm-ingest` (live, shares the same code path, wasn't in the
+   original list). `birdeye-breadth-daily`'s exact image/entrypoint/env vars
+   are **not** in this repo — flagged as unconfirmed in the card; whoever
+   deployed it should fill that in.
+
+**Not done — needs a supervised session (no `gcloud`/BigQuery access here):**
+- This code has **not been run against real BigQuery** — cannot verify from
+  an unattended session. Recommend a supervised dry run before trusting it
+  broadly (e.g. `gcloud run jobs execute birdeye-15m-ingest --region
+  europe-central2 --wait`, or a local run with `--limit-tokens 1`).
+- All three Dockerfiles (`Dockerfile.hourly_ingest`, `Dockerfile.ingest_candles`,
+  `Dockerfile.candidate_pull`) needed a `COPY` fix to include the new
+  `bq_merge_upsert.py` — done in this session — so a rebuild is required, not
+  just a restart.
+- Redeploy, once verified:
+  ```
+  gcloud builds submit --project crypto-trading-474111 --config cloudbuild.yaml \
+    --substitutions="_DOCKERFILE=Dockerfile.hourly_ingest,_IMAGE=europe-central2-docker.pkg.dev/crypto-trading-474111/rl/birdeye-hourly-ingest:latest" .
+  gcloud builds submit --project crypto-trading-474111 --config cloudbuild.yaml \
+    --substitutions="_DOCKERFILE=Dockerfile.ingest_candles,_IMAGE=<image birdeye-15m-ingest/birdeye-evm-ingest/birdeye-gate-wide-ingest currently run>" .
+  gcloud builds submit --project crypto-trading-474111 --config cloudbuild.yaml \
+    --substitutions="_DOCKERFILE=Dockerfile.candidate_pull,_IMAGE=europe-central2-docker.pkg.dev/crypto-trading-474111/rl/birdeye-candidate-pull:latest" .
+
+  # Image-only update -- do NOT use `gcloud run jobs deploy` with --set-env-vars
+  # here, it REPLACES all env vars and would drop birdeye-hourly-ingest's
+  # out-of-band TOKENS_QUERY (see deploy_hourly_ingest.sh's own warning comment).
+  gcloud run jobs update birdeye-hourly-ingest    --region europe-central2 --image <IMAGE>
+  gcloud run jobs update birdeye-15m-ingest       --region europe-central2 --image <IMAGE>
+  gcloud run jobs update birdeye-evm-ingest       --region europe-central2 --image <IMAGE>
+  gcloud run jobs update birdeye-gate-wide-ingest --region europe-central2 --image <IMAGE>
+  gcloud run jobs update birdeye-candidate-pull   --region europe-central2 --image <IMAGE>
+  # birdeye-breadth-daily: find its actual image/job name first (not in this repo).
+  ```
+- Files changed this session: `bq_merge_upsert.py` (new),
+  `test_bq_merge_upsert.py` (new, pure-logic unit tests, no BQ needed),
+  `ingest_candles.py`, `backfill_birdeye_ohlcv.py`, `hourly_ingest.sh`,
+  `README.md`, `Dockerfile.hourly_ingest`, `Dockerfile.ingest_candles`,
+  `Dockerfile.candidate_pull`, `ESTATE.md` (new).
+
+- **Status:** BLOCKED — code complete for all 3 asks; needs a supervised
+  session to run `python3 -m unittest test_bq_merge_upsert.py`, dry-run one
+  job against real BigQuery, then rebuild+redeploy per the commands above.
 
 ---
 
 ## Resolved log
 
 _(empty)_
+
+---
+
+## Session log
+
+**2026-08-12, unattended session.** Worked T-001 (only open task).
+
+What changed:
+- Added `bq_merge_upsert.py` — atomic `MERGE ... USING UNNEST(@rows) ...
+  WHEN NOT MATCHED THEN INSERT` upsert keyed on `(token_address,
+  price_timestamp, chain)`. Chosen over a lock/lease table because BigQuery
+  already serializes DML on the same destination table, so the merge key
+  itself is race-free without adding a second piece of state.
+- Rewired `ingest_candles.py` (`write_rows()`) and `backfill_birdeye_ohlcv.py`
+  (`append_rows()`) to upsert through it, replacing the old
+  read-existing-keys-then-`WRITE_APPEND`/load-job pattern that raced under
+  concurrency. `candidate_pull.py` needed no direct change — it subprocesses
+  `backfill_birdeye_ohlcv.py` for OHLCV, so it inherits the fix.
+- Removed now-dead code in `ingest_candles.py` (`STREAM_CHUNK`,
+  `BULK_THRESHOLD`, the load-job/streaming fallback, `import io`) since MERGE
+  replaces both write paths uniformly.
+- Fixed all three Dockerfiles (`Dockerfile.hourly_ingest`,
+  `Dockerfile.ingest_candles`, `Dockerfile.candidate_pull`) to `COPY
+  bq_merge_upsert.py` — caught this before it became a silent runtime
+  ImportError in every job; none of them packaged the new shared module by
+  default.
+- Updated docstrings/comments in `ingest_candles.py`, `backfill_birdeye_ohlcv.py`,
+  `hourly_ingest.sh`, and `README.md` so the idempotency claims match what
+  actually guarantees it now (MERGE, not the pre-read filter), and updated
+  `--skip-existing-check`'s help text accordingly.
+- Added `test_bq_merge_upsert.py` — unit tests for the pure logic
+  (key-dedup, SQL generation, timestamp coercion) that don't need BigQuery.
+  Could not run them: `python3` execution requires interactive approval that
+  isn't available in this unattended session (confirmed by testing —
+  `python3 --version` runs, but `-m unittest` / `-c` do not). Everything was
+  verified by manual read-through instead, not by execution.
+- Wrote `ESTATE.md` registering the 5 components GOV named plus
+  `birdeye-evm-ingest` (live, same code path, wasn't in GOV's list).
+  `birdeye-breadth-daily`'s image/entrypoint/schedule are not in this repo —
+  marked unconfirmed rather than guessed.
+
+What GOV should know:
+- **This has not touched real BigQuery.** No BQ access in this session (hard
+  limit, as expected) — the MERGE query shape (`ArrayQueryParameter` of
+  `StructQueryParameter`, `num_dml_affected_rows`) is standard
+  google-cloud-bigquery usage but is unexercised. Treat as needing a
+  supervised dry run before wide rollout, not as verified-working.
+- T-001 marked **BLOCKED**, not DONE: the design/code/docs work for all 3
+  asks is complete, but closing the loop needs BigQuery access and
+  `gcloud`/Cloud Build, both outside this session's permissions. Exact
+  commands are in T-001's response above.
+- Found and fixed a hidden landmine that had nothing to do with the ask
+  directly: without the Dockerfile `COPY` fix, deploying the write-path
+  change as originally written would have broken every job with an
+  `ImportError` on first run.
+- Nothing else was in INBOX.md — no other open tasks this session.

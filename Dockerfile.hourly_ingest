@@ -14,7 +14,7 @@ WORKDIR /app
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
-COPY backfill_birdeye_ohlcv.py hourly_ingest.sh /app/
+COPY backfill_birdeye_ohlcv.py bq_merge_upsert.py hourly_ingest.sh /app/
 RUN chmod +x /app/hourly_ingest.sh
 
 ENTRYPOINT ["/app/hourly_ingest.sh"]

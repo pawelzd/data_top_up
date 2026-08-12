@@ -1,8 +1,12 @@
 # Birdeye OHLCV Backfill
 
 Backfills hourly Solana token OHLCV data from Birdeye into BigQuery for the
-addresses in `tokens.json`. Existing rows are skipped by checking
-`(token_address, price_timestamp, chain)` before appending.
+addresses in `tokens.json`. The BigQuery write is an atomic MERGE keyed on
+`(token_address, price_timestamp, chain)` (`bq_merge_upsert.py`, T-001,
+2026-08-12), so concurrent or overlapping runs cannot create duplicate rows.
+A pre-write BigQuery read still checks for existing rows too, but only to
+save Birdeye API cost by skipping hours already covered -- it is not what
+guarantees no duplicates.
 
 The credentials used to run the script must be able to read and append to the
 target table. For the duplicate check, grant at least BigQuery Data Viewer on
@@ -134,7 +138,8 @@ python .\backfill_birdeye_ohlcv.py --rate-limit-rpm 60
 ```
 
 If the account can append but cannot read the table, you can bypass the
-duplicate check, but this may create duplicate rows:
+existing-row pre-check -- this costs more Birdeye CU (re-fetches hours
+already covered) but the MERGE write still dedupes, so no duplicate rows:
 
 ```powershell
 python .\backfill_birdeye_ohlcv.py --skip-existing-check
@@ -159,12 +164,16 @@ existing hourly chain at :01/:02, dbt :08, shadow :12).
 - **Why a separate entrypoint** rather than extending `backfill_birdeye_ohlcv.py`: that
   script hard-codes `type="1H"` and feeds live production; per DEPLOYMENT.md §5 rule 1
   this change is purely additive and cannot affect the hourly path.
-- **Idempotent**: skips existing `(token_address, price_timestamp)` in the lookback
-  window, so re-runs/overlaps can't duplicate. `HOURS_BACK=6` in steady state; raise it
-  for gap fills.
-- **Bulk writes**: >20k rows use a load job, falling back to chunked streaming if the
-  runtime SA lacks dataset-level `tables.create` (it holds table-level rights only).
-  One-time gap fill of 2026-07-20→08-10 (240,136 rows) was run locally on 2026-08-10.
+- **Idempotent**: writes go through the same atomic MERGE as `backfill_birdeye_ohlcv.py`
+  (`bq_merge_upsert.py`, T-001, 2026-08-12), keyed on `(token_address, price_timestamp,
+  chain)`, so re-runs/overlaps can't duplicate regardless of timing. The existing-keys
+  pre-filter is a Birdeye-CU cost optimisation only. `HOURS_BACK=6` in steady state;
+  raise it for gap fills.
+- **Bulk writes**: batched through `bq_merge_upsert.merge_upsert()` regardless of size
+  (chunked internally to stay under BigQuery's query-parameter size limits) -- this also
+  sidesteps needing dataset-level `tables.create`, which the runtime SA does not hold
+  (table-level rights only). One-time gap fill of 2026-07-20→08-10 (240,136 rows) was run
+  locally on 2026-08-10, before this change, via the old load-job path.
 - **Rate**: `RATE_LIMIT_RPM=600`, top-500 tokens/run — polite alongside the hourly ingest.
 - Runtime SA: `challenger-paper@` with `roles/bigquery.dataEditor` on the target table only.
 

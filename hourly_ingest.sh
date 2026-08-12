@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # hourly_ingest.sh — pull the last closed hour of OHLCV for the tradable universe
 # into core.token_ohlcv (Cloud Run Job, runs every hour). Thin wrapper over
-# backfill_birdeye_ohlcv.py, which is idempotent: it dedups against existing
-# (token, hour) rows, so re-pulling the last few hours is safe. --end-date
-# defaults to the current UTC hour (the in-progress candle is skipped), so each
-# run lands the most recent CLOSED hour.
+# backfill_birdeye_ohlcv.py, which is idempotent at the write (atomic MERGE, see
+# bq_merge_upsert.py -- T-001): re-pulling the last few hours, or overlapping
+# with another writer, cannot create duplicate rows. --end-date defaults to the
+# current UTC hour (the in-progress candle is skipped), so each run lands the
+# most recent CLOSED hour.
 #
 # Auth: BIRDEYE_API_KEY (Secret Manager) + ADC for BigQuery (the runtime SA).
 set -euo pipefail

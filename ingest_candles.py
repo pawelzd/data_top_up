@@ -18,8 +18,12 @@ Universe: Birdeye tokenlist top-N by v24hUSD (default 500) — same source the h
 pipeline's candidate pull uses, so breadth does not depend on the (currently degraded)
 token set already present in core.token_ohlcv.
 
-Idempotent: existing (token_address, price_timestamp) rows in the lookback window are
-skipped, so re-runs and overlapping schedules cannot duplicate.
+Idempotent: writes go through an atomic MERGE keyed on (token_address,
+price_timestamp, chain) -- see bq_merge_upsert.py (T-001, 2026-08-12) -- so
+concurrent/overlapping runs cannot create duplicate rows even if they race.
+The existing-keys pre-filter below is a cost optimisation only (skips
+re-fetching hours already covered from Birdeye); it is not what guarantees
+correctness.
 
 Env:
   BIRDEYE_API_KEY   (required)   BIGQUERY_TABLE   default core.token_ohlcv_15m
@@ -30,7 +34,6 @@ Env:
 """
 from __future__ import annotations
 
-import io
 import json
 import os
 import sys
@@ -41,6 +44,8 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from google.cloud import bigquery
+
+from bq_merge_upsert import merge_upsert
 
 try:
     from obs_log import Logger            # shared estate logger
@@ -68,8 +73,6 @@ CANDLE_SECONDS = {"15m": 900, "1H": 3600, "1h": 3600}.get(INTERVAL, 900)
 _chains_raw = os.getenv("CHAINS", "").replace("|", ",")   # "|" allowed: commas are
 CHAINS = [tuple(p.split(":")) for p in _chains_raw.split(",") if ":" in p] \
          or [(CHAIN, BE_CHAIN)]                            # awkward in gcloud env flags
-STREAM_CHUNK = 2000        # rows per streaming insert request
-BULK_THRESHOLD = 20000     # above this, use a load job instead of streaming
 Q = Decimal("0.000000001")
 
 log = Logger(os.getenv("SERVICE_NAME", "birdeye-candles-ingest"))
@@ -179,39 +182,21 @@ def main() -> int:
         return 0
     if not write_rows(rows):
         return 1
-    log.event("run_end", appended=len(rows))
     return 0
 
 
 def write_rows(rows: list[dict]) -> bool:
-    """Small batches stream; bulk (gap-fill) goes through a load job — streaming
-    inserts cap out well below a multi-week backfill."""
-    if len(rows) <= BULK_THRESHOLD:
-        for i in range(0, len(rows), STREAM_CHUNK):
-            errors = bq.insert_rows_json(TABLE, rows[i:i + STREAM_CHUNK])
-            if errors:
-                log.error("bq_insert_failed", errors=str(errors)[:500])
-                return False
-        return True
-    buf = io.BytesIO("\n".join(json.dumps(r) for r in rows).encode())
-    cfg = bigquery.LoadJobConfig(
-        source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
-        write_disposition=bigquery.WriteDisposition.WRITE_APPEND)
+    """Atomic upsert via bq_merge_upsert.merge_upsert() -- see T-001. Safe under
+    concurrent/overlapping runs: a duplicate (token_address, price_timestamp,
+    chain) is silently skipped by the MERGE rather than appended."""
     try:
-        bq.load_table_from_file(buf, TABLE, job_config=cfg, location=LOCATION).result()
-        log.event("bulk_loaded", rows=len(rows))
+        inserted = merge_upsert(bq, TABLE, rows, LOCATION)
+        log.event("run_end", fetched=len(rows), inserted=inserted,
+                  skipped_duplicate=len(rows) - inserted)
         return True
     except Exception as e:
-        # Load jobs need dataset-level bigquery.tables.create; the runtime SA holds
-        # table-level rights only (least privilege). Fall back to chunked streaming.
-        log.event("bq_load_failed_falling_back", level="WARNING", error=str(e)[:300])
-        for i in range(0, len(rows), STREAM_CHUNK):
-            errors = bq.insert_rows_json(TABLE, rows[i:i + STREAM_CHUNK])
-            if errors:
-                log.error("bq_insert_failed", errors=str(errors)[:500])
-                return False
-        log.event("bulk_streamed", rows=len(rows))
-        return True
+        log.error("bq_merge_failed", error=str(e)[:500])
+        return False
 
 
 if __name__ == "__main__":

@@ -6,6 +6,13 @@ BigQuery table with this schema:
 
 token_address STRING, price_timestamp TIMESTAMP, close NUMERIC, high NUMERIC,
 open NUMERIC, low NUMERIC, volume NUMERIC, chain STRING
+
+Idempotent at the write (T-001, 2026-08-12): append_rows() upserts via an
+atomic MERGE (bq_merge_upsert.py) keyed on (token_address, price_timestamp,
+chain), so concurrent/overlapping invocations -- e.g. the hourly job racing a
+backfill covering the same hours -- cannot create duplicate rows. The
+existing-keys check below is a Birdeye-CU cost optimisation only; it is not
+what guarantees correctness anymore, so --skip-existing-check is safe to use.
 """
 
 from __future__ import annotations
@@ -23,6 +30,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import requests
 from google.api_core.exceptions import Forbidden, NotFound
 from google.cloud import bigquery
+
+from bq_merge_upsert import merge_upsert
 
 
 # Two OHLCV endpoints, identical candle payload (verified byte-parity on o/h/l/c/v):
@@ -196,8 +205,10 @@ def parse_args() -> argparse.Namespace:
         "--skip-existing-check",
         action="store_true",
         help=(
-            "Do not query the target table before loading. This can create duplicate "
-            "rows and should only be used when you cannot read the table."
+            "Do not query the target table before fetching. Costs more Birdeye "
+            "CU (re-fetches hours already covered) but the BigQuery write itself "
+            "is always deduplicated via MERGE (see bq_merge_upsert.py), so this "
+            "cannot create duplicate rows. Use when you cannot read the table."
         ),
     )
     return parser.parse_args()
@@ -779,20 +790,18 @@ def append_rows(
     batch_size: int,
     location: str,
 ) -> int:
+    """Atomic upsert via bq_merge_upsert.merge_upsert() (T-001, 2026-08-12).
+    Previously a WRITE_APPEND load job -- correctness depended on the caller's
+    fetch_existing_keys() read happening-before every concurrent writer's
+    write, which two overlapping runs (hourly job vs. breadth backfill) broke.
+    The MERGE is atomic per batch, so overlapping/concurrent runs can no
+    longer duplicate rows. `batch_size` (--insert-batch-size) still bounds how
+    many rows this call stages at once; merge_upsert subdivides further per
+    MERGE statement to stay under BigQuery's query-parameter size limits."""
     inserted = 0
-    job_config = bigquery.LoadJobConfig(
-        write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
-        source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
-    )
-
     for start in range(0, len(rows), batch_size):
         batch = rows[start : start + batch_size]
-        job = client.load_table_from_json(
-            batch, table, job_config=job_config, location=location
-        )
-        job.result()
-        inserted += len(batch)
-
+        inserted += merge_upsert(client, table, batch, location)
     return inserted
 
 
@@ -1018,7 +1027,8 @@ def main() -> int:
 
     existing_keys: Set[Tuple[str, int, str]] = set()
     if args.skip_existing_check:
-        print("Skipping existing-row check; duplicate rows may be appended.")
+        print("Skipping existing-row check; will re-fetch more from Birdeye than "
+              "necessary, but the MERGE write still dedupes -- no duplicate rows.")
     elif gap_mode:
         print("Gap mode: existing-row checks will run one token at a time.")
     else:
@@ -1038,8 +1048,8 @@ def main() -> int:
                 "BigQuery denied read access to the target table. To skip rows "
                 "that already exist, the credentials running this script need "
                 f"permission to query {args.table}. Grant BigQuery Data Viewer "
-                "on the dataset/table, or run with --skip-existing-check if you "
-                "accept possible duplicates.",
+                "on the dataset/table, or run with --skip-existing-check to fetch "
+                "everything and let the MERGE write dedupe instead.",
                 file=sys.stderr,
             )
             print(f"Original error: {exc}", file=sys.stderr)

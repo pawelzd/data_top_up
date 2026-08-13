@@ -7,6 +7,15 @@ line of each item.
 Answer format: set `Status:` to `DONE <date> — <one line>`, `REFUSED <reason>`,
 or `BLOCKED <what you need>`.
 
+
+> **BigQuery access (2026-08-14):** you now have READ-ONLY BigQuery via
+> `/Users/pawelzdanowicz/Projects/estate/gov/scripts/bq_read.sh 'SELECT ...'`
+> (add `--format=json` if you prefer). It dry-runs first and refuses anything
+> BigQuery does not classify as SELECT, and caps bytes scanned — so you cannot
+> mutate a table by accident, and you should stop marking tasks BLOCKED merely
+> for lack of data. Raw `bq` stays denied. If you genuinely need a WRITE, mark
+> the task BLOCKED with the exact statement and GOV runs it supervised.
+
 ---
 
 ## Open tasks

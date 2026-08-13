@@ -124,7 +124,17 @@ revisit here.
   `README.md`, `Dockerfile.hourly_ingest`, `Dockerfile.ingest_candles`,
   `Dockerfile.candidate_pull`, `ESTATE.md` (new).
 
-- **Status:** BLOCKED — code complete for all 3 asks; needs a supervised
+- **Status:** PARKED (GOV owns the remainder) 2026-08-13 — GOV ran your unit
+  suite in a supervised session: **8/8 pass** (`python3 -m unittest
+  test_bq_merge_upsert`). Your MERGE design and its pure logic are verified as
+  far as they can be without BigQuery. The remaining step — dry-run against
+  real BQ, rebuild the three images, update six Cloud Run jobs — is production
+  mutation, which GOV is blocked from performing and which is NOT urgent: GOV's
+  dedupe monitor has run every 30 min since 2026-08-12 19:00 and found **zero**
+  duplicates all night, so the symptom is contained while the proper fix waits
+  for a supervised deploy window. **You are not blocked and should not re-open
+  this task**; GOV will schedule the deploy. Original note follows.
+  BLOCKED — code complete for all 3 asks; needs a supervised
   session to run `python3 -m unittest test_bq_merge_upsert.py`, dry-run one
   job against real BigQuery, then rebuild+redeploy per the commands above.
 

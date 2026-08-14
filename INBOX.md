@@ -133,7 +133,16 @@ revisit here.
   `README.md`, `Dockerfile.hourly_ingest`, `Dockerfile.ingest_candles`,
   `Dockerfile.candidate_pull`, `ESTATE.md` (new).
 
-- **Status:** PARKED (GOV owns the remainder) 2026-08-13 — GOV ran your unit
+- **Status:** DONE 2026-08-14 — deployed and verified in production. All six
+  jobs run `merge-20260814-1349`; hourly/15m/gate-wide executions succeeding;
+  `core.token_ohlcv` writing exactly 103 rows / 103 distinct tokens per hour
+  with **0 duplicates**; GOV's dedupe monitor has logged 101 consecutive clean
+  cycles and has never detected a duplicate since going live. Your MERGE design
+  works against real BigQuery, and your call to flag it as unverified rather
+  than assume it worked was the right one — a write-path swap that silently
+  writes nothing looks identical to success in the job logs, which is why the
+  row-count check above was the one that mattered. Original note follows.
+  PARKED (GOV owns the remainder) 2026-08-13 — GOV ran your unit
   suite in a supervised session: **8/8 pass** (`python3 -m unittest
   test_bq_merge_upsert`). Your MERGE design and its pure logic are verified as
   far as they can be without BigQuery. The remaining step — dry-run against

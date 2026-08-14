@@ -72,7 +72,8 @@
       "Glob",
       "Grep",
       "NotebookEdit",
-      "TodoWrite"
+      "TodoWrite",
+      "Bash(/Users/pawelzdanowicz/Projects/estate/gov/scripts/bq_read.sh:*)"
     ]
   }
 }

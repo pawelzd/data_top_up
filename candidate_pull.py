@@ -361,7 +361,13 @@ def main() -> int:
     if total_cand == 0:
         log.error("no_candidates", error="no candidates persisted for any chain")
         return 1
-    log.info("cycle_done", chains=len(chains), total_candidates=total_cand)
+    # n_chains, NOT chains: `cycle_start` logs chains=["sol","eth",...] (an array),
+    # so the BigQuery log sink typed jsonPayload.chains as STRING REPEATED. Sending
+    # an INT under the same key made the sink reject this row outright --
+    # "Repeated value added outside of an array, field: chains" -- silently losing
+    # the run summary on every multi-chain pull since 2026-08-06 (three so far:
+    # 08-06, 08-10, 08-18). One key, one type.
+    log.info("cycle_done", n_chains=len(chains), total_candidates=total_cand)
     return 0
 
 
